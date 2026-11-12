@@ -100,15 +100,18 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
 }
 
+// Pronunciation: Google Translate's voice (the built-in iOS German voice sounded bad).
+// Needs internet; offline it stays silent. One reused <audio> element keeps iOS happy.
+let ttsAudio = null;
 function speak(text) {
-  if (!('speechSynthesis' in window)) return;
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text.split(';')[0]);
-  u.lang = 'de-DE';
-  u.rate = 0.95;
-  const voice = speechSynthesis.getVoices().find((v) => v.lang && v.lang.startsWith('de'));
-  if (voice) u.voice = voice;
-  speechSynthesis.speak(u);
+  const q = String(text).split(';')[0].replace(/[()]/g, '').trim();
+  if (!q) return;
+  try {
+    ttsAudio = ttsAudio || new Audio();
+    ttsAudio.pause();
+    ttsAudio.src = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=de&q=${encodeURIComponent(q)}`;
+    ttsAudio.play().catch(() => {});
+  } catch (e) { /* no audio */ }
 }
 
 // ---------- Words ----------
@@ -172,7 +175,7 @@ function dueWords() {
 }
 
 function newWords() {
-  return db.words.filter((w) => w.reviews === 0).sort((a, b) => a.added - b.added);
+  return db.words.filter((w) => w.reviews === 0).sort((a, b) => b.added - a.added); // newest first
 }
 
 function newLeftToday() {
@@ -621,7 +624,6 @@ function renderCard() {
       ` : `
         <form class="answer-row" id="answer-form" autocomplete="off">
           <input id="answer" type="text" lang="de" placeholder="In German…" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done">
-          ${SR ? `<button type="button" class="mic" data-act="mic" aria-label="Answer by voice">${ICONS.mic}</button>` : ''}
         </form>
         <div class="btn-row">
           <button class="btn" data-act="dontknow">Don’t know</button>
@@ -647,7 +649,6 @@ function renderCard() {
     if (act === 'quit') quitSession();
     if (act === 'check') submitTyped();
     if (act === 'dontknow') reveal(false);
-    if (act === 'mic') toggleMic();
     if (act === 'speak') speak(w.de);
     if (act === 'next') nextCard();
     if (act === 'override') { session.pending = { ok: true, overridden: true }; renderCard(); }
@@ -1091,7 +1092,7 @@ function doImport() {
   const base = Date.now();
   fresh.forEach((p, i) => {
     const w = newWord(p.de, p.en);
-    w.added = base + i; // keep list order for the new-words queue
+    w.added = base - i; // newest-first queue: words added later come first, the list keeps its order
     const s = p.saved;
     if (s && typeof s.stage === 'number') {
       for (const k of ['stage', 'due', 'reviews', 'correct', 'wrong', 'firstSeen', 'lastSeen']) if (k in s) w[k] = s[k];
@@ -1184,8 +1185,7 @@ function renderSettings() {
 }
 
 function voiceNote() {
-  if (SR) return 'Voice input: the mic button on each card.';
-  return 'Built-in speech recognition isn’t available in this browser — use the mic on the iPhone keyboard.';
+  return 'Voice input: use the mic on the iPhone keyboard.';
 }
 
 async function exportBackup() {
@@ -1386,7 +1386,6 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('online', () => syncNow({ quiet: true }));
 
-if ('speechSynthesis' in window) speechSynthesis.getVoices(); // warm up the voice list
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

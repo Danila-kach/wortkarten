@@ -1,5 +1,5 @@
 // Offline cache for the app shell. When shipping changes, bump CACHE here and the ?v= in index.html.
-const CACHE = 'wortkarten-v8';
+const CACHE = 'wortkarten-v9';
 const ASSETS = [
   './',
   './index.html',
