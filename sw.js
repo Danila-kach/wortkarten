@@ -1,11 +1,12 @@
 // Offline cache for the app shell. When shipping changes, bump CACHE here and the ?v= in index.html.
-const CACHE = 'wortkarten-v9';
+const CACHE = 'wortkarten-v10';
 const ASSETS = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './manifest.webmanifest',
+  './widget.js',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',

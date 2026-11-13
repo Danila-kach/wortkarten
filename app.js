@@ -147,17 +147,23 @@ function counts() {
   return c;
 }
 
-function grade(w, ok) {
+// Hard words: the last answer was "Don't know" (hard = 'dk') or a miss (hard = 'miss').
+// They feed the "Practice hard words" drill and the lock-screen widget, and clear on the next correct answer.
+function grade(w, ok, dontKnow) {
   const t = today();
   w.reviews++;
   w.lastSeen = t;
   w.updated = Date.now();
   if (!w.firstSeen) w.firstSeen = t;
   if (ok) {
+    delete w.hard; delete w.hardAt;
     w.correct++;
     if (w.stage >= INTERVALS.length) { w.stage = LEARNED; w.due = null; }
     else { w.due = addDays(INTERVALS[w.stage]); w.stage++; }
   } else {
+    w.hard = dontKnow || w.hard === 'dk' ? 'dk' : 'miss';
+    w.hardAt = Date.now();
+    if (dontKnow) w.dk = (w.dk || 0) + 1;
     w.wrong++;
     w.stage = 0;
     w.due = addDays(1);
@@ -165,6 +171,12 @@ function grade(w, ok) {
   const h = db.history[t] || (db.history[t] = { correct: 0, wrong: 0 });
   ok ? h.correct++ : h.wrong++;
   save();
+}
+
+function hardWords() {
+  return db.words
+    .filter((w) => w.hard)
+    .sort((a, b) => (a.hard === 'dk' ? 0 : 1) - (b.hard === 'dk' ? 0 : 1) || (b.hardAt || 0) - (a.hardAt || 0));
 }
 
 function dueWords() {
@@ -492,6 +504,7 @@ function renderHome() {
   const pct = total ? Math.round((c.learned / total) * 100) : 0;
   const st = streak();
   const tomorrow = dueOn(addDays(1));
+  const hard = hardWords();
 
   const buckets = [
     { label: 'New', cls: '', n: c.new },
@@ -544,6 +557,12 @@ function renderHome() {
       <div class="stat"><b>${c.learned}</b><span>learned</span></div>
     </div>
     <div class="card today">${todayBlock}</div>
+    ${hard.length ? `
+    <div class="card">
+      <h2>Hard words</h2>
+      <p class="muted small">${plural(hard.length, 'word')} you didn’t know or missed. Drill them as often as you like: practice doesn’t change your review schedule.</p>
+      <button class="btn block" data-act="practice">Practice hard words</button>
+    </div>` : ''}
     ${total ? `
     <div class="card">
       <h2>By stage</h2>
@@ -561,6 +580,7 @@ function renderHome() {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'start') startSession(false);
     if (act === 'extra') startSession(true);
+    if (act === 'practice') startPractice();
     if (act === 'add') go('add');
   };
 }
@@ -573,6 +593,16 @@ function startSession(ignoreNewLimit) {
   const ids = buildSet(ignoreNewLimit);
   if (!ids.length) { toast('Nothing to review right now'); return; }
   session = { ids, i: 0, results: [] };
+  resetCard();
+  go('session');
+}
+
+// Practice: hard words only, no effect on the schedule. A missed word comes back
+// at the end of the drill (up to 3 times) so you can keep at it right away.
+function startPractice() {
+  const ids = hardWords().slice(0, db.settings.setSize).map((w) => w.id);
+  if (!ids.length) { toast('No hard words right now'); return; }
+  session = { ids: shuffle(ids), i: 0, results: [], practice: true, repeats: {} };
   resetCard();
   go('session');
 }
@@ -604,7 +634,7 @@ function renderCard() {
       </div>
 
       <div class="flash ${state} ${session.shake ? 'shake' : ''}">
-        <div class="lang">English${status(w) === 'new' ? ' · new word' : ''}</div>
+        <div class="lang">English${session.practice ? ' · practice' : status(w) === 'new' ? ' · new word' : ''}</div>
         <div class="prompt">${esc(w.en)}</div>
         <div class="dots" title="Word progress">${dots}</div>
         ${p ? `
@@ -613,7 +643,7 @@ function renderCard() {
               <button class="icon-btn" data-act="speak" aria-label="Pronounce">${ICONS.speaker}</button>
             </div>
             ${!p.ok && wrongTries.length ? `<div class="you">You said: ${wrongTries.map((t) => `<s>${esc(t)}</s>`).join(', ')}</div>` : ''}
-            <div class="verdict">${p.ok ? (p.overridden ? 'Counted as correct ✓' : 'Correct!') : 'Missed — back tomorrow'}</div>
+            <div class="verdict">${p.ok ? (p.overridden ? 'Counted as correct ✓' : 'Correct!') : session.practice ? 'Coming back at the end' : 'Missed — back tomorrow'}</div>
           </div>` : ''}
         ${!p && session.feedback ? `<div class="feedback">${esc(session.feedback)}</div>` : ''}
       </div>
@@ -648,7 +678,7 @@ function renderCard() {
     if (!act) return;
     if (act === 'quit') quitSession();
     if (act === 'check') submitTyped();
-    if (act === 'dontknow') reveal(false);
+    if (act === 'dontknow') reveal(false, true);
     if (act === 'speak') speak(w.de);
     if (act === 'next') nextCard();
     if (act === 'override') { session.pending = { ok: true, overridden: true }; renderCard(); }
@@ -674,9 +704,9 @@ function submitAnswer(answers) {
   renderCard();
 }
 
-function reveal(ok) {
+function reveal(ok, dontKnow) {
   stopListening();
-  session.pending = { ok };
+  session.pending = { ok, dk: !!dontKnow };
   if (db.settings.autoSpeak) speak(currentWord().de);
   renderCard();
 }
@@ -684,8 +714,15 @@ function reveal(ok) {
 function nextCard() {
   const w = currentWord();
   if (w && session.pending) {
-    grade(w, session.pending.ok);
-    session.results.push({ id: w.id, ok: session.pending.ok });
+    const { ok, dk } = session.pending;
+    if (session.practice) {
+      const r = session.repeats[w.id] || 0;
+      if (!session.results.some((x) => x.id === w.id)) session.results.push({ id: w.id, ok });
+      if (!ok && r < 3) { session.repeats[w.id] = r + 1; session.ids.push(w.id); }
+    } else {
+      grade(w, ok, dk);
+      session.results.push({ id: w.id, ok });
+    }
   }
   session.i++;
   resetCard();
@@ -748,6 +785,8 @@ function renderSummary() {
   const good = res.filter((r) => r.ok).length;
   const bad = res.length - good;
   const more = buildSet(false).length;
+  const practice = !!session.practice;
+  const hardLeft = hardWords().length;
   const row = (r) => {
     const w = db.words.find((x) => x.id === r.id);
     if (!w) return '';
@@ -755,19 +794,23 @@ function renderSummary() {
   };
 
   view.innerHTML = `
-    <header class="top"><h1>Set complete</h1></header>
+    <header class="top"><h1>${practice ? 'Practice done' : 'Set complete'}</h1></header>
     <div class="summary-score">
       <div class="good"><b>${good}</b>knew</div>
       <div class="poor"><b>${bad}</b>missed</div>
     </div>
-    ${bad ? `<h2>Back tomorrow</h2><div class="list" style="margin-bottom:18px">${res.filter((r) => !r.ok).map(row).join('')}</div>` : ''}
+    ${bad ? `<h2>${practice ? 'Missed on the first try' : 'Back tomorrow'}</h2><div class="list" style="margin-bottom:18px">${res.filter((r) => !r.ok).map(row).join('')}</div>` : ''}
     ${good ? `<h2>Correct</h2><div class="list" style="margin-bottom:18px">${res.filter((r) => r.ok).map(row).join('')}</div>` : ''}
-    ${more ? `<button class="btn primary block big" data-act="again">Another set</button>` : ''}
+    ${practice
+      ? `<button class="btn primary block big" data-act="practice">Practice again</button>`
+      : more ? `<button class="btn primary block big" data-act="again">Another set</button>` : ''}
+    ${!practice && hardLeft ? `<button class="btn block big" data-act="practice" style="margin-top:10px">Practice hard words (${hardLeft})</button>` : ''}
     <button class="btn block big" data-act="home" style="margin-top:10px">Home</button>`;
 
   view.onclick = (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'again') startSession(false);
+    if (act === 'practice') startPractice();
     if (act === 'home') { session = null; go('home'); }
   };
 }
@@ -783,6 +826,7 @@ function renderWords() {
     ['new', `New ${c.new}`],
     ['learning', `Learning ${c.learning}`],
     ['learned', `Learned ${c.learned}`],
+    ['hard', `Hard ${hardWords().length}`],
   ];
   view.innerHTML = `
     <header class="top"><h1>Words</h1></header>
@@ -803,7 +847,7 @@ function renderWords() {
 function renderWordList() {
   const q = norm(wordsQuery);
   const list = db.words
-    .filter((w) => wordsFilter === 'all' || status(w) === wordsFilter)
+    .filter((w) => wordsFilter === 'all' || (wordsFilter === 'hard' ? w.hard : status(w) === wordsFilter))
     .filter((w) => !q || norm(w.de).includes(q) || norm(w.en).includes(q))
     .sort((a, b) => b.added - a.added);
   const shown = list.slice(0, 400);
@@ -862,6 +906,7 @@ function renderEdit(id) {
     }
     if (act === 'reset' && confirm('Start learning this word from scratch?')) {
       Object.assign(w, { stage: 0, due: today(), reviews: 0, correct: 0, wrong: 0, firstSeen: null, lastSeen: null, updated: Date.now() });
+      delete w.hard; delete w.hardAt;
       save(); renderEdit(id);
     }
     if (act === 'delete' && confirm(`Delete “${w.de}”?`)) {
@@ -1175,6 +1220,7 @@ function renderSettings() {
       connectSync(token);
     }
     if (act === 'sync') { syncNow(); renderSyncCard(); }
+    if (act === 'widget') copyWidgetCode();
     if (act === 'disconnect' && confirm('Stop syncing on this device? Your words stay here and in the gist.')) {
       sync = {}; saveSync(); renderSyncCard();
     }
@@ -1370,7 +1416,38 @@ function syncCardHtml() {
     <div class="btn-row" style="margin-top:10px">
       <button class="btn" data-act="disconnect">Disconnect</button>
       <button class="btn primary" data-act="sync">Sync now</button>
-    </div>`;
+    </div>
+    ${sync.gistId ? `
+    <h2 style="margin-top:22px">Lock-screen widget</h2>
+    <p class="muted small">Shows 3 hard words and changes them every 3 hours from 8:00 to 20:00, not overnight. It reads the synced words, so it needs the free <b>Scriptable</b> app from the App Store.</p>
+    <ol class="muted small" style="padding-left:18px;margin:8px 0 12px">
+      <li>Tap “Copy widget code”.</li>
+      <li>In Scriptable tap +, paste, and name the script “Wortkarten”.</li>
+      <li>Long-press the lock screen → Customize → Lock Screen → add a Scriptable widget (the wide one), tap it and choose the script “Wortkarten”.</li>
+    </ol>
+    <button class="btn block" data-act="widget">Copy widget code</button>
+    <textarea id="widget-code" readonly hidden style="margin-top:10px;height:120px;font-size:11px"></textarea>` : ''}`;
+}
+
+// Scriptable widget code, prefetched so the copy happens inside the tap (Safari requires that).
+let widgetCode = null;
+fetch('widget.js?v=10').then((r) => (r.ok ? r.text() : null)).then((t) => { widgetCode = t; }).catch(() => {});
+
+function widgetDataUrl() {
+  return `https://gist.githubusercontent.com/${sync.login}/${sync.gistId}/raw/${GIST_FILE}`;
+}
+
+function copyWidgetCode() {
+  if (!widgetCode) { toast('Widget code is still loading, try again'); return; }
+  const code = widgetCode.replace("'WIDGET_DATA_URL'", `'${widgetDataUrl()}'`);
+  const showManual = () => {
+    const ta = $('#widget-code');
+    if (!ta) return;
+    ta.hidden = false; ta.value = code; ta.focus(); ta.select();
+    toast('Select all and copy it by hand');
+  };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(code).then(() => toast('Widget code copied'), showManual);
+  else showManual();
 }
 
 function renderSyncCard() {
